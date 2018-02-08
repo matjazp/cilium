@@ -82,10 +82,8 @@ type Envoy struct {
 	LogPath           string
 	AccessLogPath     string
 	accessLogListener *net.UnixListener
-	ldsSock           string
-	lds               *LDSServer
-	rdsSock           string
-	rds               *RDSServer
+	xdsSock           string
+	xds               *XDSServer
 	admin             *admin
 }
 
@@ -108,15 +106,13 @@ func StartEnvoy(adminPort uint32, stateDir, logDir string, baseID uint64) *Envoy
 	bootstrapPath := filepath.Join(stateDir, "bootstrap.pb")
 	logPath := filepath.Join(logDir, "cilium-envoy.log")
 	adminAddress := "127.0.0.1:" + strconv.FormatUint(uint64(adminPort), 10)
-	ldsPath := filepath.Join(stateDir, "lds.sock")
-	rdsPath := filepath.Join(stateDir, "rds.sock")
+	xdsPath := filepath.Join(stateDir, "xds.sock")
 	accessLogPath := filepath.Join(stateDir, "access_log.sock")
 
 	e := &Envoy{
 		LogPath:       logPath,
 		AccessLogPath: accessLogPath,
-		ldsSock:       ldsPath,
-		rdsSock:       rdsPath,
+		xdsSock:       xdsPath,
 		admin:         &admin{adminURL: "http://" + adminAddress + "/"},
 	}
 
@@ -126,16 +122,13 @@ func StartEnvoy(adminPort uint32, stateDir, logDir string, baseID uint64) *Envoy
 
 	// Create static configuration
 	createBootstrap(bootstrapPath, nodeId, "cluster1", "version1",
-		"ldsCluster", ldsPath, "rdsCluster", rdsPath, "cluster1", adminPort)
+		xdsPath, "cluster1", adminPort)
 
 	e.startAccesslogServer(accessLogPath)
 
 	log.Debug("Envoy: Starting ", *e)
 
-	e.lds = createLDSServer(ldsPath, accessLogPath)
-	e.rds = createRDSServer(rdsPath, e.lds)
-	e.rds.run()
-	e.lds.run(e.rds)
+	e.xds = createXDSServer(xdsPath, accessLogPath)
 
 	// make it a buffered channel so we can not only
 	// read the written value but also skip it in
@@ -267,11 +260,11 @@ func (e *Envoy) accessLogger(conn *net.UnixConn) {
 		}
 
 		// Correlate the log entry with a listener
-		l := e.lds.findListener(pblog.CiliumResourceName)
+		logger := e.xds.findListenerLogger(pblog.CiliumResourceName)
 
 		// Call the logger.
-		if l != nil {
-			l.logger.Log(&pblog)
+		if logger != nil {
+			logger.Log(&pblog)
 		} else {
 			log.Infof("Envoy: Orphan Access log message for %s: %s", pblog.CiliumResourceName, pblog.String())
 		}
@@ -287,8 +280,7 @@ func (e *Envoy) StopEnvoy() error {
 		e.accessLogListener = nil
 	}
 	log.Info("Envoy: Stopping process ", e.cmd.Process.Pid)
-	e.rds.stop()
-	e.lds.stop()
+	e.xds.stop()
 	err := e.admin.quit()
 	if err != nil {
 		log.WithError(err).Fatal("Envoy: Admin quit failed, killing process ", e.cmd.Process.Pid)
@@ -303,17 +295,17 @@ func (e *Envoy) StopEnvoy() error {
 
 // AddListener adds a listener to a running Envoy proxy.
 func (e *Envoy) AddListener(name string, port uint16, l7rules policy.L7DataMap, isIngress bool, logger Logger, wg *completion.WaitGroup) {
-	e.lds.addListener(name, port, l7rules, isIngress, logger, wg)
+	e.xds.addListener(name, port, l7rules, isIngress, logger, wg)
 }
 
 // UpdateListener changes to the L7 rules of an existing Envoy Listener.
 func (e *Envoy) UpdateListener(name string, l7rules policy.L7DataMap, wg *completion.WaitGroup) {
-	e.lds.updateListener(name, l7rules, wg)
+	e.xds.updateListener(name, l7rules, wg)
 }
 
 // RemoveListener removes an existing Envoy Listener.
 func (e *Envoy) RemoveListener(name string, wg *completion.WaitGroup) {
-	e.lds.removeListener(name, wg)
+	e.xds.removeListener(name, wg)
 }
 
 // ChangeLogLevel changes Envoy log level to correspond to the logrus log level 'level'.
